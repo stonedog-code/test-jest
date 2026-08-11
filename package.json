@@ -1,0 +1,53 @@
+{
+  "name": "@nehsa-net/test-jest",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reference Jest test framework: unit, integration and e2e tiers for a TypeScript service",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nehsa-net/test-jest.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "start": "node --import tsx src/index.ts",
+    "test": "jest --selectProjects unit",
+    "test:unit": "jest --selectProjects unit",
+    "test:integration": "jest --selectProjects integration --runInBand",
+    "test:e2e": "jest --selectProjects e2e --runInBand",
+    "test:all": "jest --runInBand",
+    "test:watch": "jest --selectProjects unit --watch",
+    "test:coverage": "jest --selectProjects unit --coverage",
+    "test:coverage:all": "jest --runInBand --coverage",
+    "test:changed": "jest --selectProjects unit --onlyChanged",
+    "test:ci": "jest --selectProjects unit --ci --coverage --maxWorkers=2",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc --noEmit",
+    "ci": "npm run typecheck && npm run lint && npm run test:all"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.20.0",
+    "@testcontainers/postgresql": "^11.0.3",
+    "@types/express": "^5.0.0",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^22.13.0",
+    "@types/pg": "^8.11.11",
+    "@types/supertest": "^6.0.2",
+    "eslint": "^9.20.0",
+    "eslint-plugin-jest": "^29.16.0",
+    "jest": "^30.4.2",
+    "supertest": "^7.0.0",
+    "ts-jest": "^29.4.12",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.24.0"
+  }
+}

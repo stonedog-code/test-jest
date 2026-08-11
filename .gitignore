@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editors
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local environment overrides — never commit real values
+.env
+.env.local

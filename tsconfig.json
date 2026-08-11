@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2023"],
+    "types": ["node", "jest"],
+
+    "rootDir": ".",
+    "outDir": "dist",
+
+    /* Strictness. Every flag here is one the tests would otherwise have to
+       check for by hand. `strict` alone leaves the two below off. */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+
+    /* Each file compiles independently. ts-jest needs this (its own option of
+       the same name is deprecated), and it rejects patterns that cannot work
+       under a single-file transform. */
+    "isolatedModules": true,
+
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "declaration": false,
+    "sourceMap": true
+  },
+  "include": ["src/**/*", "test/**/*", "*.ts"],
+  "exclude": ["node_modules", "dist", "coverage"]
+}

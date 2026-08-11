@@ -1,0 +1,103 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The unit tier is its own job so it reports in under a minute. Bundling
+  # every tier into one job gives the same verdict twenty minutes later, and
+  # people stop waiting for it.
+  unit:
+    name: Unit tier
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm ci`, never `npm install`. ci installs exactly the lockfile and
+      # fails if package.json disagrees with it; install would silently resolve
+      # a different tree than the one anyone tested.
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests with coverage
+        run: npm run test:ci
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 14
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
+  integration:
+    name: Integration tier
+    runs-on: ubuntu-latest
+    # GitHub's ubuntu runners ship a working Docker daemon, which is all
+    # testcontainers needs. Nothing else has to be provisioned.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:integration
+
+  e2e:
+    name: E2E tier
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:e2e
+
+  # One required check to protect the branch with, so the branch rule does not
+  # need editing every time a job is added or renamed.
+  all-green:
+    name: All tiers green
+    runs-on: ubuntu-latest
+    needs: [unit, lint, integration, e2e]
+    if: always()
+    steps:
+      - name: Fail if any tier failed or was skipped
+        run: |
+          results='${{ join(needs.*.result, ' ') }}'
+          echo "tier results: $results"
+          for r in $results; do
+            if [ "$r" != "success" ]; then
+              echo "::error::a required tier did not pass: $results"
+              exit 1
+            fi
+          done
