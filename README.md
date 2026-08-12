@@ -63,6 +63,32 @@ source ~/.nvm/nvm.sh && nvm use 24
 
 ---
 
+## Running the tests without CI
+
+**GitHub Actions is disabled on this repository.** Nothing runs automatically on
+push, so the gate is whatever you run by hand.
+
+The workflow in `.github/workflows/test.yml` is kept deliberately: it is
+reference material, and it has been verified by executing it in a real runner
+container with [`act`](https://github.com/nektos/act). It is accurate; it is
+simply not switched on.
+
+| Command | What it covers |
+|---|---|
+| `npm test` | Unit tier. The one to run on every change |
+| `npm run test:integration` | Integration tier — needs Docker running |
+| `npm run test:e2e` | E2E tier — spawns the real process |
+| `npm run test:all` | All three tiers |
+| `npm run test:coverage` | Unit coverage plus the thresholds |
+| `npm run typecheck` / `npm run lint` | Types and lint on their own |
+| `npm run ci` | Everything the workflow would run |
+
+**`npm run ci` is the gate.** With Actions off it is the only thing between a
+mistake and `main`, so run it before every commit — not just before the ones
+that feel risky.
+
+---
+
 ## How it works
 
 ### Layout
@@ -563,6 +589,11 @@ are what give each tier its own command.
 5. **E2E tests** for the process: config validation, startup, shutdown, health.
 
 ### Step 5 — Wire the gate
+
+> **Note:** Actions is switched off on *this* repository (see "Running the tests
+> without CI"), so the gate here is `npm run ci`, run by hand. The advice in this
+> section is for the repo you are setting up, where you should wire it properly.
+
 
 Copy the workflow, then require the **All tiers green** check in branch
 protection. A tier that runs only on somebody's laptop is documentation, not a

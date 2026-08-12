@@ -17,6 +17,21 @@ example down while it is fresh.
 
 The exemption is **not inherited**. It covers this repo only, at this root.
 
+## GitHub Actions is disabled here
+
+Actions is switched off at the repository level, so **nothing runs on push**.
+`npm run ci` is the only gate, and it runs on your machine or not at all.
+
+The workflow in `.github/workflows/test.yml` is kept on purpose: it is part of
+what this repo teaches, and it has been verified by executing it in a real
+runner container with `act`. Do not delete it, and do not assume it ran.
+
+Re-enable with:
+
+```bash
+gh api -X PUT repos/nehsa-net/<repo>/actions/permissions -F enabled=true
+```
+
 ## What must stay true
 
 - **All three tiers are green at every commit.** `npm run ci` before committing.
