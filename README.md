@@ -348,6 +348,345 @@ exclusion is invisible; a written-down zero is a claim somebody can check.
 
 ---
 
+## Dependency injection
+
+There is no DI framework here, and there does not need to be one. **Dependency
+injection in TypeScript is passing an argument** — the whole discipline is
+deciding that a module takes its dependencies rather than reaching for them.
+
+[The seams that make tiers possible](#the-seams-that-make-tiers-possible) shows
+the three that carry this repo. This section is the general form.
+
+### The rule
+
+> A module that reaches out — network, clock, filesystem, database, random,
+> `process.env` — takes that capability as a parameter.
+
+Everything else follows. The payoff is not testability in the abstract; it is
+that **`jest.mock` appears nowhere in this repo**, and therefore nothing leaks
+between test files.
+
+### Three shapes, in the order you should try them
+
+**1. A parameter with a production default.** The cheapest seam there is.
+
+```ts
+export type FetchLike = (
+  input: string,
+  init?: { signal?: AbortSignal; headers?: Record<string, string> },
+) => Promise<Response>;
+
+constructor({ baseUrl, apiKey, fetchImpl, timeoutMs = 10_000 }: ClientOptions) {
+  this.fetchImpl = fetchImpl ?? globalThis.fetch;   // production stays terse
+}
+```
+
+The default is what makes this palatable: callers in `src/index.ts` never pass
+`fetchImpl`, so the seam costs production code nothing and buys the test
+everything.
+
+**2. A constructor parameter, typed as an interface the consumer declares.**
+
+```ts
+// service.ts — declared next to the CONSUMER, not next to WeatherClient
+export interface WeatherProvider {
+  fetchConditions(city: string): Promise<Conditions>;
+}
+
+constructor(provider: WeatherProvider, options: ServiceOptions = {}) { … }
+```
+
+`WeatherService` needs exactly one method, so the interface has exactly one
+method. That is the difference between a fake that is one line and a fake that
+is a code-generation problem:
+
+```ts
+const provider = { fetchConditions: async () => SAMPLE };   // the whole fake
+```
+
+**Declare the interface where it is used, not where it is implemented.** An
+interface owned by the implementation grows to match the implementation; one
+owned by the consumer stays as narrow as the consumer's actual need.
+
+**3. A factory that returns the thing instead of starting it.**
+
+```ts
+export function createApp(service: Describer): Express { … }   // returns; does not listen
+```
+
+This is the seam that makes the HTTP tier possible in-process. No port is bound,
+so tests cannot collide over one, and there is nothing to tear down.
+
+### Inject the ambient things too
+
+The dependencies people forget are the ones that do not look like dependencies:
+
+```ts
+// Time
+constructor(provider: WeatherProvider, options: ServiceOptions = {}) {
+  this.now = options.now ?? (() => new Date());
+}
+new WeatherService(provider, { now: () => new Date('2026-08-13T09:00:00Z') });
+
+// Environment
+export function load(env: NodeJS.ProcessEnv): Config { … }
+load({ WEATHER_API_KEY: 'test' });    // not process.env
+```
+
+`load` taking the environment as a parameter is what lets the config tests run
+in parallel: nothing mutates shared process state, so nothing leaks into another
+worker. The moment a test does `process.env.X = 'y'`, that test owns the whole
+process and its neighbours become order-dependent.
+
+The same argument applies to `Math.random`, `crypto.randomUUID`, and anything
+generating an id. A test that cannot predict the id ends up asserting
+`expect.any(String)`, which is a test that would pass if the id were always
+empty.
+
+### The composition root
+
+Wiring lives in exactly one place — `src/index.ts` — and that place does
+nothing else:
+
+```ts
+const config = load(process.env);
+const client = new WeatherClient({ baseUrl: config.upstreamUrl, apiKey: config.apiKey });
+const store = config.databaseUrl ? new ObservationStore(new Pool(…)) : undefined;
+const service = new WeatherService(client, store ? { recorder: store } : {});
+createApp(service).listen(config.port, …);
+```
+
+**Everything below the composition root is testable; the root itself is not.**
+That is fine, and it is why the e2e tier exists: it spawns this file as a real
+process, which is the only way to prove the wiring is right. Keep the root thin
+enough that "the wiring is right" is the only thing it can get wrong.
+
+### Optional dependencies: null is a valid injection
+
+```ts
+private readonly recorder: ObservationRecorder | undefined;
+```
+
+A `WeatherService` with no recorder is a legitimate configuration, not a broken
+one — and it keeps the unit tests free of database concerns entirely. Modelling
+"this sink is absent" as `undefined` rather than as a null-object mock means the
+absent case gets its own test instead of being simulated.
+
+### When you cannot inject
+
+Sometimes the dependency is genuinely not yours to change:
+
+```ts
+// A spy — targeted, restorable, and scoped to one test
+const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+// A property that is not a function, restored automatically by restoreMocks
+jest.replaceProperty(featureFlags, 'newCheckout', true);
+
+// Module mocking — LAST resort
+jest.mock('../some-module');
+```
+
+`replaceProperty` only works on a **writable, configurable** property — it
+throws on restore for host-defined read-only ones such as `process.platform`,
+which is one more argument for owning the object you need to vary.
+
+Ranked worst-last for concrete reasons. `jest.mock` is **hoisted above the
+imports** (which surprises everyone), it is **global to the test file**, and it
+couples the test to the module graph rather than to an interface — so a refactor
+that moves a function breaks tests that never mentioned it. `restoreMocks: true`
+in the config is what stops the first two forms leaking; nothing saves you from
+the third.
+
+**Reaching for `jest.mock` is a design signal.** It almost always means the
+missing seam is the real problem.
+
+### Anti-patterns
+
+| Instead of | Do | Because |
+|---|---|---|
+| `import { db } from './db'` at module scope | Take the pool as a constructor argument | A module-level singleton is shared by every test in the file |
+| `process.env.API_KEY` read inside a function | `load(env)` at the composition root | Env reads make tests order-dependent and un-parallelizable |
+| `new Date()` inside the code under test | An injected `now: () => Date` | Otherwise the assertion races the wall clock |
+| An interface with twelve methods | Several one-method interfaces at the consumers | Wide interfaces are what make mocking frameworks feel necessary |
+| `jest.mock('../client')` | Pass a fake client in | Module mocks couple the test to the file layout |
+| A fake that reimplements the real thing | A fake that returns a fixed value | A clever fake is code with no tests of its own |
+
+---
+
+## Parameterization
+
+### `it.each`, three forms
+
+**Array of tuples** — best when the cases are positional and typed:
+
+```ts
+it.each<[string, string | undefined, Units]>([
+  ['empty string defaults to imperial', '', 'imperial'],
+  ['metric', 'metric', 'metric'],
+  ['mixed case is accepted', 'MeTrIc', 'metric'],
+])('%s', (_name, input, expected) => {
+  expect(parseUnits(input)).toBe(expected);
+});
+```
+
+The explicit type parameter is doing real work: without it TypeScript widens the
+rows to `(string | undefined)[]` and a column swapped by accident still
+compiles.
+
+**A flat array** — when each case is a single value:
+
+```ts
+it.each(['kelvin', 'rankine', '!!', '0'])('rejects %p', (input) => {
+  expect(() => parseUnits(input)).toThrow(InvalidUnitsError);
+});
+
+it.each([401, 429, 500, 503])('throws UpstreamError on %i', async (status) => { … });
+```
+
+**Array of objects** — best when there are more than three columns, because the
+call site names them:
+
+```ts
+it.each([
+  { city: 'Orlando', units: 'metric', expected: 21.5 },
+  { city: 'Orlando', units: 'imperial', expected: 70.7 },
+])('renders $city in $units as $expected', ({ city, units, expected }) => { … });
+```
+
+`$variable` interpolation only works with the object form — `$city`, and
+`$obj.nested` for a path. There is also `$#` for the row index, which is a last
+resort: a title reading "case 3" is a title that tells you nothing.
+
+### Placeholders
+
+| Token | Renders | Use for |
+|---|---|---|
+| `%s` | String value | Names, plain strings |
+| `%p` | `pretty-format` output | Values where `''` and `'   '` must be distinguishable |
+| `%i` / `%d` | Integer / number | Status codes, counts |
+| `%j` | JSON | Small objects |
+| `%#` | Row index | Nothing, if you can avoid it |
+
+**`%p` over `%s` for anything that might be empty or whitespace.** With `%s`,
+`throws on ` and `throws on    ` are indistinguishable in a report; `%p` renders
+them through `pretty-format` as `throws on ""` and `throws on "   "`. That
+distinction is exactly what you need the day one of them fails — and it is what
+makes `-t 'throws on ""'` able to select the case.
+
+### `describe.each` — parameterizing a whole block
+
+```ts
+describe.each<[string, Units, number]>([
+  ['imperial', 'imperial', 70.7],
+  ['metric', 'metric', 21.5],
+])('in %s units', (_name, units, expected) => {
+  it('renders the temperature', async () => { … });
+  it('echoes the unit back', async () => { … });
+});
+```
+
+Reach for this when several assertions share the same parameter. Nesting
+`describe.each` inside `describe.each` produces a cross-product, which is
+occasionally what you want and more often a suite nobody can read — three rows
+by four rows by two rows is twenty-four tests and one unreadable report.
+
+### The contract-test pattern
+
+The highest-value form of parameterization: **run one suite against several
+implementations** to prove they are interchangeable.
+
+```ts
+// test/helpers/recorder-contract.ts
+export function itBehavesLikeARecorder(
+  name: string,
+  makeRecorder: () => Promise<{ recorder: ObservationRecorder; readAll: () => Promise<Conditions[]> }>,
+): void {
+  describe(`${name} (recorder contract)`, () => {
+    it('persists an observation', async () => {
+      const { recorder, readAll } = await makeRecorder();
+      await recorder.record(SAMPLE);
+      await expect(readAll()).resolves.toHaveLength(1);
+    });
+
+    it('rejects an out-of-range humidity', async () => { … });
+  });
+}
+```
+
+```ts
+itBehavesLikeARecorder('in-memory', async () => …);          // unit tier
+itBehavesLikeARecorder('postgres', async () => …);           // integration tier
+```
+
+This is what stops the in-memory fake used by the unit tier from drifting away
+from the real store. A fake nobody tests is a fake that will eventually make the
+unit tier pass while production is broken.
+
+**Only the shared behaviour goes in the contract.** `NUMERIC(5,2)` coming back
+as a string, and the `UNIQUE (city, observed_at)` constraint, are Postgres facts
+— they belong in the integration test, not in a contract the in-memory version
+is expected to satisfy.
+
+### Generating from a source of truth
+
+Where the production code already holds a table, drive the tests from that same
+table rather than retyping it:
+
+```ts
+// src/errors.ts — the map the handler itself dispatches on
+export const STATUS_BY_ERROR = {
+  InvalidCityError: 400,
+  InvalidUnitsError: 400,
+  CityNotFoundError: 404,
+  UpstreamError: 502,
+} as const;
+```
+
+```ts
+it.each(Object.entries(STATUS_BY_ERROR))('maps %s to HTTP %i', async (name, status) => { … });
+```
+
+(`src/app.ts` here dispatches with an `instanceof` chain instead, which is fine
+at four cases — the table form starts paying once the list is long enough that
+somebody will add to it without looking at the tests.)
+
+The value is not brevity — it is that adding an error type without a test
+becomes impossible. Two rules:
+
+- **Never generate cases from something produced at runtime.** A table derived
+  from a live query silently becomes zero rows the day the query returns
+  nothing, and a suite of zero tests passes.
+- **Assert the table is not empty** when it is computed: `expect(CASES.length).
+  toBeGreaterThan(0)` is one line and closes the whole failure mode.
+
+### Modifiers stack
+
+```ts
+it.each(rows)('…');
+it.only.each(rows)('…');        // focus the generated set
+it.skip.each(rows)('…');
+it.failing.each(rows)('…');     // asserts these currently FAIL — for a known bug
+it.concurrent.each(rows)('…');  // only where the cases share no state
+```
+
+`it.failing` is the honest way to land a reproduction before the fix: it fails
+the suite if the test starts passing, so the day somebody fixes the bug the
+suite tells them to flip it.
+
+### When not to parameterize
+
+- **When the rows assert different things.** A body full of
+  `if (row.expectError)` is three tests wearing a trenchcoat. Split it.
+- **When there are two cases.** Two named tests read better than a two-row table
+  and a loop.
+- **When the table restates the implementation.** A table of arithmetic checked
+  by re-doing the arithmetic tests the table.
+- **When a row needs a comment to explain why it is there.** That is a test with
+  a name, not a row.
+
+---
+
 ## Patterns worth copying
 
 ### Naming: read it out loud
@@ -363,18 +702,10 @@ survive that reading is a test nobody will understand at 3am.
 
 ### `it.each` — the table-driven form
 
-```ts
-it.each<[string, string | undefined, Units]>([
-  ['empty string defaults to imperial', '', 'imperial'],
-  ['metric', 'metric', 'metric'],
-  ['mixed case is accepted', 'MeTrIc', 'metric'],
-])('%s', (_name, input, expected) => {
-  expect(parseUnits(input)).toBe(expected);
-});
-```
-
-Adding a case is one line. The `%s`/`%p`/`%i` placeholders are interpolated into
-the test name, so a failure names the case rather than saying "row 4".
+Adding a case is one line, and the `%s`/`%p`/`%i` placeholders are interpolated
+into the test name, so a failure names the case rather than saying "row 4". See
+[Parameterization](#parameterization) for the three forms, `describe.each`, and
+the contract-test pattern.
 
 ### Async assertions — the mistake everybody makes once
 
@@ -510,6 +841,72 @@ expect(message).not.toContain(secret);
 ```
 
 `jest/no-conditional-expect` enforces this.
+
+---
+
+## Best practices
+
+The short list. Everything here is expanded somewhere above; this is the version
+to read before a review.
+
+### Design for the test, not around it
+
+- **Take dependencies as parameters.** Network, clock, database, environment,
+  randomness. If `jest.mock` feels necessary, the missing seam is the real
+  problem.
+- **Declare interfaces at the consumer, and keep them one method wide.** That is
+  what makes a fake one line instead of a code-generation problem.
+- **Return the app; do not listen.** A factory is what lets supertest drive HTTP
+  in-process with no port to collide over.
+- **Keep the composition root thin.** Everything below it is testable; the root
+  itself is only provable by the e2e tier.
+
+### Pick the right tier
+
+- **A unit test that needs setup is in the wrong tier.** The 5s unit timeout
+  here exists to make that a build failure rather than an opinion.
+- **Push assertions down wherever they will go**, and keep the slow tiers for
+  what only they can prove — real constraints, real signals, real exit codes.
+- **Do not let a fake drift.** If a fake stands in for a real implementation,
+  run one contract suite against both.
+
+### Write the assertion that can fail
+
+- **`await expect(promise).rejects` — never `expect(promise).toThrow()`.** A
+  Promise is not a function that throws, so the second form passes
+  unconditionally.
+- **Assert error *types*, not messages.** A reworded message should not be a
+  build failure; a wrong error type should.
+- **Never `expect` inside a `catch`.** If the code unexpectedly succeeds the
+  catch never runs and the test passes while proving nothing.
+- **Assert what was sent, not only what came back.** A client that drops the
+  city parameter satisfies every response-shaped assertion.
+- **Silence expected noise *and* assert it happened.** A handler that stops
+  logging its cause leaves operators blind.
+
+### Keep tests independent
+
+- **`clearMocks` and `restoreMocks` on.** Without them a test passes alone and
+  fails in the suite — the most expensive flake to diagnose, because the failing
+  test is not the broken one.
+- **Never mutate `process.env` in a test.** It makes the whole file
+  order-dependent. Pass the environment in instead.
+- **Restore fake timers in the same test that installs them.** Leaked timer
+  state breaks a later, unrelated test in the same worker.
+- **No shared mutable module state between tests.** Build it per test, or make
+  it a constant.
+
+### Watch the report, not just the colour
+
+- **Check the test count.** A `testMatch` typo, a `describe.skip` and an empty
+  generated table all produce a green run of nothing.
+- **Review every snapshot diff.** `--updateSnapshot` makes any failure
+  disappear, including a real one.
+- **Never hand-write a snapshot**, and never snapshot a timestamp, id, or random
+  value.
+- **Coverage counts execution, not assertions.** A test that calls a function
+  and asserts nothing scores the same as one checking every field.
+- **A skipped test needs an issue.** Otherwise it is a deletion nobody approved.
 
 ---
 
